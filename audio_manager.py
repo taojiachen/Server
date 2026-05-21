@@ -79,7 +79,6 @@ class DialogSession:
         self.use_microphone = use_microphone
         self.db_manager = None
         self.mac_address = None
-        self.conversation_id = None
         self._analysis_in_progress = False
         self.history_summary = None
         self.custom_start_session_req = copy.deepcopy(config.start_session_req)
@@ -123,9 +122,6 @@ class DialogSession:
         self.audio_buffer = b''
         self.esp_server = None
 
-        # 紧急模式标志
-        self.emergency_mode = False
-
         signal.signal(signal.SIGINT, self._keyboard_signal)
         self.audio_queue = queue.Queue()
         if not self.is_audio_file_input:
@@ -146,29 +142,10 @@ class DialogSession:
                 time.sleep(0.1)
             except Exception as e:
                 print(f"音频播放错误: {e}")
-                time.sleep(0.1)
 
     def set_esp_server(self, esp_server):
         self.esp_server = esp_server
         print("ESP服务器引用已设置")
-
-    async def _ensure_conversation(self):
-        if self.conversation_id:
-            return self.conversation_id
-        if not self.db_manager or not self.mac_address:
-            return None
-        try:
-            conv = await self.db_manager.get_device_latest_conversation(self.mac_address)
-            if conv and conv.get('ended_at') is None:
-                self.conversation_id = conv['id']
-                print(f"✅ 复用现有会话，conversation_id={self.conversation_id}")
-            else:
-                self.conversation_id = await self.db_manager.create_conversation(self.mac_address)
-                print(f"🆕 创建新会话，conversation_id={self.conversation_id}")
-            return self.conversation_id
-        except Exception as e:
-            print(f"获取/创建会话失败: {e}")
-            return None
 
     async def _try_auto_analysis(self):
         if self._analysis_in_progress or not self.db_manager or not self.mac_address:
@@ -208,12 +185,8 @@ class DialogSession:
 
             self.current_audio_buffer += audio_data
 
-            # 转发音频到单片机（紧急模式下丢弃）
+            # 转发音频到单片机
             if self.real_time_sending and self.esp_server and hasattr(self.esp_server, 'active_connections'):
-                if self.emergency_mode:
-                    # 紧急模式：丢弃 AI 音频，清空缓冲
-                    self.accumulated_buffer = b''
-                    return
                 self.accumulated_buffer += audio_data
                 while len(self.accumulated_buffer) >= 960:
                     chunk = self.accumulated_buffer[:960]
@@ -222,7 +195,7 @@ class DialogSession:
                         *[conn.send(chunk) for conn in self.esp_server.active_connections],
                         return_exceptions=True
                     )
-                    await asyncio.sleep(0.2)
+                    await asyncio.sleep(0.08)
 
         elif response['message_type'] == 'SERVER_FULL_RESPONSE':
             print(f"服务器响应: {response}")
@@ -263,9 +236,8 @@ class DialogSession:
                         user_text = result.get('text', '')
                         if user_text:
                             print(f"用户说: {user_text}")
-                            await self._ensure_conversation()
-                            if self.conversation_id and self.db_manager:
-                                await self.db_manager.add_message(self.conversation_id, 'user', user_text)
+                            if self.db_manager and self.mac_address:
+                                await self.db_manager.add_message(self.mac_address, 'user', user_text)
                                 asyncio.create_task(self._try_auto_analysis())
 
             if event == 351:
@@ -273,9 +245,8 @@ class DialogSession:
                 full_reply = text if text else self.current_reply_text
                 if full_reply:
                     print(f"AI 回复: {full_reply}")
-                    await self._ensure_conversation()
-                    if self.conversation_id and self.db_manager:
-                        await self.db_manager.add_message(self.conversation_id, 'AI', full_reply)
+                    if self.db_manager and self.mac_address:
+                        await self.db_manager.add_message(self.mac_address, 'AI', full_reply)
                         asyncio.create_task(self._try_auto_analysis())
                     self.current_reply_text = ''
 
@@ -288,12 +259,11 @@ class DialogSession:
 
             if event == 359:
                 if self.current_reply_text:
-                    await self._ensure_conversation()
-                    if self.conversation_id and self.db_manager:
-                        await self.db_manager.add_message(self.conversation_id, 'AI', self.current_reply_text)
+                    if self.db_manager and self.mac_address:
+                        await self.db_manager.add_message(self.mac_address, 'AI', self.current_reply_text)
                     self.current_reply_text = ''
                 print("收到音频结束事件，发送剩余音频数据")
-                if not self.emergency_mode and len(self.accumulated_buffer) > 0:
+                if len(self.accumulated_buffer) > 0:
                     await asyncio.gather(
                         *[conn.send(self.accumulated_buffer) for conn in self.esp_server.active_connections],
                         return_exceptions=True

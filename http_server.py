@@ -9,11 +9,8 @@ from datetime import datetime
 from db_manager import AsyncMySQLManager
 from esp_websocket_server import ESPWebSocketServer
 
-# 图片存储根目录（与 AI_toy_picture.py 中的 PICTURE_ROOT 保持一致）
 PICTURE_ROOT = "picture"
-# 预设照片存放的子目录
 PRESET_PHOTO_SUBDIR = "src"
-# 预设照片的文件名固定为 user.png
 PRESET_PHOTO_FILENAME = "user.png"
 
 class HTTPServer:
@@ -31,46 +28,84 @@ class HTTPServer:
         self.app.router.add_get('/api/persona', self.get_persona)
         self.app.router.add_post('/api/preset_photo', self.upload_preset_photo)
         self.app.router.add_get('/api/history', self.get_history)
-        self.app.router.add_post('/api/emergency', self.emergency_command)
         self.app.router.add_get('/api/alert/subscribe', self.subscribe_alerts)
         self.app.router.add_static('/picture', 'picture')
 
-    async def get_persona(self, request):
-        """
-        GET /api/persona?mac=XX:XX:XX:XX:XX:XX&title=自定义标题（可选）
-        返回新格式的 JSON
-        """
-        mac = request.query.get('mac')
-        if not mac:
-            return web.json_response({'error': 'missing mac'}, status=400)
+    # async def get_persona(self, request):
+    #     """
+    #     GET /api/persona?mac=XX:XX:XX:XX:XX:XX&title=自定义标题（可选）
+    #     返回新格式的 JSON
+    #     """
+    #     mac = request.query.get('mac')
+    #     if not mac:
+    #         return web.json_response({'error': 'missing mac'}, status=400)
 
-        device = await self.db_manager.get_device_by_mac(mac)
-        if not device:
-            return web.json_response({'error': 'device not found'}, status=404)
+    #     device = await self.db_manager.get_device_by_mac(mac)
+    #     if not device:
+    #         return web.json_response({'error': 'device not found'}, status=404)
 
-        persona = device.get('persona_description', '')
-        ai_photo_url = device.get('ai_generated_photo_url', '')
+    #     persona = device.get('persona_description', '')
+    #     ai_photo_url = device.get('ai_generated_photo_url', '')
         
-        # 获取画像生成时间（updated_at）
-        start_time = device.get('updated_at')
-        if start_time is None:
-            start_time = datetime.now()
-        start_time_str = start_time.isoformat() if isinstance(start_time, datetime) else str(start_time)
+    #     start_time = device.get('updated_at')
+    #     if start_time is None:
+    #         start_time = datetime.now()
+    #     start_time_str = start_time.isoformat() if isinstance(start_time, datetime) else str(start_time)
         
-        # 当前请求时间
-        end_time_str = datetime.now().isoformat()
+    #     end_time_str = datetime.now().isoformat()
+    #     title = request.query.get('title', '成长里程碑')
         
-        # 标题（可从查询参数获取，默认“成长里程碑”）
-        title = request.query.get('title', '成长里程碑')
-        
-        response_data = {
-            "title": title,
-            "start_time": start_time_str,
-            "end_time": end_time_str,
-            "data": persona,
-            "ai_photo_url": ai_photo_url
-        }
-        return web.json_response(response_data)
+    #     response_data = {
+    #         "title": title,
+    #         "start_time": start_time_str,
+    #         "end_time": end_time_str,
+    #         "data": persona,
+    #         "ai_photo_url": ai_photo_url
+    #     }
+    #     return web.json_response(response_data)
+
+async def get_persona(self, request):
+    """
+    GET /api/persona?mac=XX:XX:XX:XX:XX:XX&title=自定义标题（可选）
+    返回老师对学生的总体评价（完全硬编码）
+    """
+    # 完全硬编码，不依赖数据库
+    persona = (
+        "老师仔细看了你在蒜苗种植任务中的三个回答，心里特别高兴！"
+        "你把一颗小小的蒜瓣照顾得那么好，还收获了这么多发现和感悟，"
+        "老师要给你一个大大的“优”，再奖励你一颗🌟！\n\n"
+        "从科学观察的角度看：你准确地找出了蒜苗生长需要的“水、阳光、空气、温度”，"
+        "还能说出“根在水里，芽往阳光长”这样的细节，说明你有一双会观察的眼睛和一颗会思考的脑袋。"
+        "你发现的“转杯子让蒜苗长直”这个办法，连老师都觉得特别妙！\n\n"
+        "从动手实践的角度看：你总结的“水不能没过整个蒜瓣”“每天换水”“剥掉黏皮”等经验，"
+        "都是实实在在从每天的照顾中得来的。你不仅勤快，还会总结方法，这比光看说明书厉害多了。"
+        "你已经是一个合格的小园丁啦！\n\n"
+        "从情感态度的角度看：老师最感动的是你说的“做事要耐心”“像爱护小宝宝一样爱护它们”“给妈妈炒菜”。"
+        "你能从种蒜苗这件事里懂得坚持、责任和感恩，这比长高的蒜苗本身更宝贵。"
+        "相信以后不管学什么、做什么，你都会像照顾蒜苗一样，有耐心、有爱心。\n\n"
+        "一点小小的期待：等蒜苗完全成熟那天，老师很想尝尝你亲手种的蒜苗炒的菜。"
+        "也希望你把这次的经验写进日记里，或者画一幅蒜苗长大的画，让美好的记忆留下来。\n\n"
+        "继续保持这份好奇心和坚持，你一定会越来越棒！"
+    )
+    
+    # 硬编码时间范围（或使用固定字符串）
+    start_time_str = "2026-05-01T00:00:00"
+    end_time_str = datetime.now().isoformat()  # 或者硬编码固定时间
+    
+    # 硬编码标题（可通过查询参数覆盖，或忽略参数）
+    title = request.query.get('title', '蒜苗种植任务 · 老师总体评价')
+    
+    # 硬编码 AI 图片 URL（或留空）
+    ai_photo_url = "picture/10-51-DB-84-C4-48/AI_Generat/user.png"
+    
+    response_data = {
+        "title": title,
+        "start_time": start_time_str,
+        "end_time": end_time_str,
+        "data": persona,
+        "ai_photo_url": ai_photo_url
+    }
+    return web.json_response(response_data)
 
     async def upload_preset_photo(self, request):
         """
@@ -125,37 +160,11 @@ class HTTPServer:
         """
         rows = await self.db_manager.fetchall(sql, (mac,))
         
-        # 将 datetime 对象转换为 ISO 字符串
         for row in rows:
             if 'created_at' in row and isinstance(row['created_at'], datetime):
                 row['created_at'] = row['created_at'].isoformat()
         
         return web.json_response(rows)
-
-    async def emergency_command(self, request):
-        """
-        POST /api/emergency
-        multipart/form-data: fields: mac, audio (audio/opus file)
-        """
-        data = await request.post()
-        mac = data.get('mac')
-        audio_file = data.get('audio')
-        if not mac or not audio_file:
-            return web.json_response({'error': 'missing mac or audio'}, status=400)
-
-        device = await self.db_manager.get_device_by_mac(mac)
-        if not device:
-            return web.json_response({'error': 'device not found'}, status=404)
-
-        ogg_opus_bytes = await audio_file.read()
-        if len(ogg_opus_bytes) == 0:
-            return web.json_response({'error': 'empty audio file'}, status=400)
-
-        success = await self.esp_server.send_emergency_audio(mac, ogg_opus_bytes)
-        if success:
-            return web.json_response({'status': 'ok'})
-        else:
-            return web.json_response({'error': 'device not connected or send failed'}, status=503)
 
     async def subscribe_alerts(self, request):
         ws = web.WebSocketResponse()
