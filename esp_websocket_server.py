@@ -309,7 +309,7 @@ class ESPWebSocketServer:
                 if sess.get('waiting_for_photo'):
                     milestone_num = sess['milestone_num']
                     mac_safe = mac.replace(':', '-')
-                    save_dir = Path(f"task/milestones{milestone_num}/answer/{mac_safe}")
+                    save_dir = Path(f"task/milestones{milestone_num}/{mac_safe}/answer")
                     save_dir.mkdir(parents=True, exist_ok=True)
                     save_path = save_dir / "picture.jpg"
                     with open(save_path, 'wb') as f:
@@ -490,7 +490,7 @@ class ESPWebSocketServer:
             opus_packets = sess.get('audio_packets', [])
             milestone_num = sess['milestone_num']
             mac_safe = mac.replace(':', '-')
-            save_dir = Path(f"task/milestones{milestone_num}/answer/{mac_safe}")
+            save_dir = Path(f"task/milestones{milestone_num}/{mac_safe}/answer")
             save_dir.mkdir(parents=True, exist_ok=True)
 
             total_frames = len(opus_packets)
