@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 import re
+from speech_recognizer import recognize_audio
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -308,12 +309,14 @@ class ESPWebSocketServer:
                 if sess.get('waiting_for_photo'):
                     milestone_num = sess['milestone_num']
                     mac_safe = mac.replace(':', '-')
-                    save_dir = Path(f"task/milestones{milestone_num}/anwser/{mac_safe}")
+                    save_dir = Path(f"task/milestones{milestone_num}/answer/{mac_safe}")
                     save_dir.mkdir(parents=True, exist_ok=True)
                     save_path = save_dir / "picture.jpg"
                     with open(save_path, 'wb') as f:
                         f.write(data)
                     logger.info(f"📸 里程碑照片已保存: {save_path} ({len(data)} bytes)")
+                    # 异步后处理：生成人物画像 + AI图片
+                    asyncio.create_task(self._finalize_milestone(mac, milestone_num))
                     del self.milestone_sessions[mac]
                     await websocket.send(json.dumps({"type": "milestone_complete", "milestone": milestone_num}))
                     return
@@ -353,8 +356,6 @@ class ESPWebSocketServer:
                 return
 
         # 对话转发（仅当数据是 Opus 格式且对话未结束时）
-        # 判断是否是 Opus：如果 payload 长度接近预期的 Opus 包大小（通常 < 200）且解码成功
-        # 简单判断：尝试解码，如果成功则认为是 Opus
         pcm_data = self.opus_decoder.decode(payload, self.audio_config.chunk_size)
         if pcm_data is not None:
             if self.dialog_session and hasattr(self.dialog_session, 'client') and not self.dialog_session.is_session_finished:
@@ -363,8 +364,35 @@ class ESPWebSocketServer:
                 except Exception as e:
                     logger.error(f"❌ 转发音频数据到对话会话失败: {e}")
         else:
-            # 解码失败，可能不是 Opus，忽略
             logger.debug(f"忽略非 Opus 数据（长度 {len(payload)}）")
+
+    async def _finalize_milestone(self, mac: str, milestone_num: int):
+        """里程碑完成后：生成劳动评价报告 → 生成 AI 图片 → 推进里程碑进度"""
+        try:
+            from persona_generator import generate_labor_evaluation_for_milestone
+            from AI_toy_picture import generate_milestone_image
+
+            # 1. 生成劳动评价并存入 assessment_evaluation
+            await generate_labor_evaluation_for_milestone(mac, milestone_num, self.db_manager)
+            logger.info(f"✅ 劳动评价报告已生成 (MAC={mac}, milestone={milestone_num})")
+
+            # 2. 生成 AI 图片（基于刚生成的评价报告）
+            await generate_milestone_image(mac, milestone_num, self.db_manager)
+            logger.info(f"✅ 里程碑 {milestone_num} AI 图片已生成 (MAC={mac})")
+
+            # 3. 推进里程碑进度
+            total_milestones = await self.db_manager.get_total_milestones_for_device(mac)
+            next_milestone = milestone_num + 1
+            if next_milestone <= total_milestones:
+                await self.db_manager.update_device_current_milestone(mac, next_milestone)
+                if self.dialog_session and self.dialog_session.mac_address == mac:
+                    await self.dialog_session.update_current_milestone(next_milestone)
+                logger.info(f"📈 设备 {mac} 里程碑从 {milestone_num} 更新到 {next_milestone}")
+            else:
+                logger.info(f"🏁 设备 {mac} 已完成所有里程碑 (当前里程碑 {milestone_num})")
+
+        except Exception as e:
+            logger.error(f"❌ 里程碑 {milestone_num} 后处理失败: {e}", exc_info=True)
 
     def _save_jpeg_image(self, data: bytes) -> Optional[str]:
         if not data or len(data) < 2:
@@ -390,9 +418,9 @@ class ESPWebSocketServer:
             msg_data = json.loads(message)
             msg_type = msg_data.get('type')
 
-            if msg_type and (msg_type.startswith('milestones_anwser_') or
-                             msg_type.startswith('anwser_question_') or
-                             msg_type.startswith('end_anwser_question_')):
+            if msg_type and (msg_type.startswith('milestones_answer_') or
+                             msg_type.startswith('answer_question_') or
+                             msg_type.startswith('end_answer_question_')):
                 mac = getattr(websocket, 'mac', None)
                 if not mac:
                     logger.warning("无法获取设备 MAC")
@@ -417,27 +445,27 @@ class ESPWebSocketServer:
         if not msg_type:
             return
 
-        match = re.match(r'milestones_anwser_(\d+)', msg_type)
+        match = re.match(r'milestones_answer_(\d+)', msg_type)
         if match:
             milestone_num = int(match.group(1))
             logger.info(f"收到里程碑开始指令: 里程碑 {milestone_num}")
             await self._start_milestone_flow(websocket, mac, milestone_num)
-            await websocket.send(json.dumps({"type": f"milestones_anwser_{milestone_num}", "status": "started"}))
+            await websocket.send(json.dumps({"type": f"milestones_answer_{milestone_num}", "status": "started"}))
             return
 
-        match = re.match(r'anwser_question_(\d+)', msg_type)
+        match = re.match(r'answer_question_(\d+)', msg_type)
         if match:
             question_num = int(match.group(1))
             sess = self.milestone_sessions.get(mac)
             if not sess:
-                logger.warning(f"收到 anwser_question_{question_num} 但没有活跃会话")
+                logger.warning(f"收到 answer_question_{question_num} 但没有活跃会话")
                 return
             total_questions = sess.get('total_questions', 0)
             if question_num > total_questions:
                 logger.warning(f"收到无效问题序号 {question_num}，最大为 {total_questions}，忽略")
                 return
             if sess.get('expecting_answer_for') is None:
-                logger.warning(f"收到 anwser_question_{question_num} 但当前未期望任何回答，忽略")
+                logger.warning(f"收到 answer_question_{question_num} 但当前未期望任何回答，忽略")
                 return
             if sess.get('expecting_answer_for') != question_num:
                 logger.warning(f"期望回答问题 {sess.get('expecting_answer_for')}，收到 {question_num}，忽略")
@@ -448,12 +476,12 @@ class ESPWebSocketServer:
             logger.info(f"开始收集问题 {question_num} 的音频回答")
             return
 
-        match = re.match(r'end_anwser_question_(\d+)', msg_type)
+        match = re.match(r'end_answer_question_(\d+)', msg_type)
         if match:
             question_num = int(match.group(1))
             sess = self.milestone_sessions.get(mac)
             if not sess or not sess.get('collecting_audio'):
-                logger.warning(f"收到 end_anwser_question_{question_num} 但未在收集音频")
+                logger.warning(f"收到 end_answer_question_{question_num} 但未在收集音频")
                 return
             if sess.get('current_question_num') != question_num:
                 logger.warning(f"当前正在收集问题 {sess.get('current_question_num')}，收到结束序号 {question_num}，忽略")
@@ -462,7 +490,7 @@ class ESPWebSocketServer:
             opus_packets = sess.get('audio_packets', [])
             milestone_num = sess['milestone_num']
             mac_safe = mac.replace(':', '-')
-            save_dir = Path(f"task/milestones{milestone_num}/anwser/{mac_safe}")
+            save_dir = Path(f"task/milestones{milestone_num}/answer/{mac_safe}")
             save_dir.mkdir(parents=True, exist_ok=True)
 
             total_frames = len(opus_packets)
@@ -470,13 +498,7 @@ class ESPWebSocketServer:
             logger.info(f"收集到 {total_frames} 个 Opus 包，预计音频时长 {duration_sec:.2f} 秒")
 
             if opus_packets:
-                # 1. 保存原始 Opus 裸流（便于调试）
-                # raw_path = save_dir / f"anwser{question_num}_raw.opus"
-                # with open(raw_path, 'wb') as f:
-                #     f.write(b''.join(opus_packets))
-                # logger.info(f"原始 Opus 流已保存: {raw_path} ({raw_path.stat().st_size} 字节)")
-
-                # 2. 解码所有 Opus 包为 PCM
+                # 解码所有 Opus 包为 PCM
                 pcm_data = bytearray()
                 decode_success_count = 0
                 for idx, opus_frame in enumerate(opus_packets):
@@ -490,15 +512,26 @@ class ESPWebSocketServer:
 
                 if pcm_data:
                     # 保存为 WAV 文件
-                    wav_path = save_dir / f"anwser{question_num}.wav"
+                    wav_path = save_dir / f"answer{question_num}.wav"
                     self._save_pcm_to_wav(pcm_data, wav_path, sample_rate=16000, channels=1, bits_per_sample=16)
                     logger.info(f"PCM 转 WAV 已保存: {wav_path}")
-
-                    # 可选：保存纯 PCM
-                    # pcm_path = save_dir / f"anwser{question_num}.pcm"
-                    # with open(pcm_path, 'wb') as f:
-                    #     f.write(pcm_data)
-                    # logger.info(f"原始 PCM 已保存: {pcm_path}")
+                    # 立即识别音频
+                    try:
+                        recognized_text = recognize_audio(str(wav_path))
+                        logger.info(f"✅ 语音识别结果: {recognized_text}")
+                        # 存入数据库
+                        device = await self.db_manager.get_device_by_mac(mac)
+                        if device:
+                            await self.db_manager.execute(
+                                """
+                                INSERT INTO milestone_answers (device_id, milestone_number, question_index, answer_text, answer_audio_path)
+                                VALUES (%s, %s, %s, %s, %s)
+                                ON DUPLICATE KEY UPDATE answer_text = VALUES(answer_text)
+                                """,
+                                (device['id'], milestone_num, question_num, recognized_text, str(wav_path))
+                            )
+                    except Exception as e:
+                        logger.error(f"❌ 语音识别失败: {e}")
                 else:
                     logger.error("没有成功解码任何 Opus 包，无法生成 WAV")
             else:
@@ -553,8 +586,8 @@ class ESPWebSocketServer:
                 file_path = str(take_photo_file)
                 logger.info(f"发送拍照指令: {file_path}")
                 sess['expecting_answer_for'] = None
-                await websocket.send(json.dumps({"type": "anwser_question_photo"}))
-                logger.info("已发送 anwser_question_photo 消息")
+                await websocket.send(json.dumps({"type": "answer_question_photo"}))
+                logger.info("已发送 answer_question_photo 消息")
                 success = await self._send_audio_chunked(websocket, file_path)
                 if success:
                     sess['photo_sent'] = True
@@ -582,7 +615,7 @@ class ESPWebSocketServer:
         success = await self._send_audio_chunked(websocket, file_path)
         if success:
             sess['expecting_answer_for'] = q_index
-            logger.info(f"问题 {q_index} 已发送，等待 'anwser_question_{q_index}'")
+            logger.info(f"问题 {q_index} 已发送，等待 'answer_question_{q_index}'")
         else:
             logger.error(f"发送问题 {q_index} 失败")
 

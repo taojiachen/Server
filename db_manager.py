@@ -1,4 +1,5 @@
 import aiomysql
+import json
 from typing import Dict, Any, Optional, List
 
 class AsyncMySQLManager:
@@ -67,56 +68,79 @@ class AsyncMySQLManager:
     async def init_tables(self):
         statements = [
             """CREATE TABLE IF NOT EXISTS `groups` (
-                id INT AUTO_INCREMENT PRIMARY KEY,
+                id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
                 name VARCHAR(100) COMMENT '组名称',
-                milestone_count INT NOT NULL DEFAULT 0 COMMENT '里程碑总数',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;""",
+                milestone_count INT NOT NULL DEFAULT 0 COMMENT '该组下里程碑总数（如3个里程碑）',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='分组/班级表';""",
 
             """CREATE TABLE IF NOT EXISTS devices (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                mac_address VARCHAR(17) NOT NULL UNIQUE COMMENT 'MAC地址',
-                group_id INT NOT NULL,
-                persona_description TEXT COMMENT '人物画像',
-                preset_photo_url VARCHAR(500) COMMENT '预设照片URL',
-                ai_generated_photo_url VARCHAR(500) COMMENT 'AI生成照片URL',
-                last_analysis_count INT DEFAULT 0 COMMENT '上次分析时的消息总数',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+                mac_address VARCHAR(17) NOT NULL UNIQUE COMMENT '设备MAC地址，格式如F0:9E:9E:22:22:DC',
+                group_id INT NOT NULL COMMENT '所属分组ID，关联groups.id',
+                persona_description TEXT COMMENT '儿童人物画像（由LLM生成）',
+                last_analysis_count INT DEFAULT 0 COMMENT '上次自动分析时的对话总条数，用于增量分析',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
                 FOREIGN KEY (group_id) REFERENCES `groups`(id) ON DELETE CASCADE,
                 INDEX idx_group (group_id)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;""",
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='设备表';""",
 
             """CREATE TABLE IF NOT EXISTS `milestones` (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                device_id INT NOT NULL COMMENT '关联设备',
-                milestone_number INT NOT NULL COMMENT '里程碑序号',
-                assessment_goal TEXT COMMENT '考核目标',
-                assessment_evaluation TEXT COMMENT '考核评价',
-                child_answer_text TEXT COMMENT '儿童回答文本',          -- 新增字段
-                task_completion_image_url VARCHAR(500) COMMENT '任务完成验收图片URL',
-                assessment_audio_url VARCHAR(500) COMMENT '考核指标音频URL',
-                child_learning_ai_drawing_url VARCHAR(500) COMMENT '儿童学习成果AI绘图URL',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+                device_id INT NOT NULL COMMENT '关联的设备ID',
+                milestone_number INT NOT NULL COMMENT '里程碑序号（1,2,3...）',
+                assessment_goal TEXT COMMENT '考核目标（整体描述）',
+                assessment_evaluation TEXT COMMENT '考核评价（可后续补充）',
+                question_count INT NOT NULL DEFAULT 0 COMMENT '该里程碑包含的问题数量',
+                questions JSON NULL COMMENT '问题列表，JSON数组，如["问题1文本","问题2文本"]',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
                 FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
                 UNIQUE KEY unique_device_milestone (device_id, milestone_number)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;""",
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='里程碑配置表';""",
+
+            """CREATE TABLE IF NOT EXISTS `milestone_answers` (
+                id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+                device_id INT NOT NULL COMMENT '关联的设备ID',
+                milestone_number INT NOT NULL COMMENT '里程碑序号',
+                question_index INT NOT NULL COMMENT '问题序号（从1开始）',
+                answer_text TEXT COMMENT '语音识别得到的文字回答',
+                answer_audio_path VARCHAR(500) COMMENT '回答音频文件的存储路径（相对路径）',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+                UNIQUE KEY unique_device_milestone_question (device_id, milestone_number, question_index)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='里程碑回答记录表';""",
 
             """CREATE TABLE IF NOT EXISTS conversations (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                device_id INT NOT NULL,
-                role ENUM('user','AI','system') NOT NULL COMMENT '对话角色',
-                content TEXT NOT NULL COMMENT '对话文本',
-                current_milestone INT NOT NULL DEFAULT 1 COMMENT '对话时的里程碑数',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                id INT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+                device_id INT NOT NULL COMMENT '关联的设备ID',
+                role ENUM('user','AI','system') NOT NULL COMMENT '对话角色：user=儿童，AI=AI助手，system=系统',
+                content TEXT NOT NULL COMMENT '对话文本内容',
+                current_milestone INT NOT NULL DEFAULT 1 COMMENT '对话时的里程碑数（用于上下文标记）',
+                summary_context TEXT COMMENT '对话上下文摘要（由LLM定期生成）',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
                 FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
                 INDEX idx_device_time (device_id, created_at)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"""
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='对话历史表';"""
         ]
         for stmt in statements:
             await self.execute(stmt)
+        # 兼容旧表：尝试添加 questions 列（若已存在则忽略）
+        try:
+            await self.execute("ALTER TABLE milestones ADD COLUMN questions JSON NULL COMMENT '问题列表，JSON数组'")
+        except Exception:
+            pass
+        # 为 devices 表添加 current_milestone 列（如果不存在）
+        try:
+            await self.execute("ALTER TABLE devices ADD COLUMN current_milestone INT NOT NULL DEFAULT 1 COMMENT '当前进行到的里程碑序号'")
+            print("✅ 已为 devices 表添加 current_milestone 列")
+        except Exception:
+            pass
+        # 确保现有设备的 current_milestone 有值
+        await self.execute("UPDATE devices SET current_milestone = 1 WHERE current_milestone IS NULL")
         print("✅ 数据库表初始化完成")
 
     # ==================== 组操作 ====================
@@ -171,6 +195,31 @@ class AsyncMySQLManager:
             print(f"❌ 添加设备失败: {e}")
             raise
 
+    async def get_device_current_milestone(self, mac: str) -> int:
+        """获取设备当前所处的里程碑序号，默认为 1"""
+        device = await self.get_device_by_mac(mac)
+        if not device:
+            return 1
+        return device.get('current_milestone', 1)
+
+    async def update_device_current_milestone(self, mac: str, milestone: int):
+        """更新设备当前里程碑序号"""
+        device = await self.get_device_by_mac(mac)
+        if not device:
+            return
+        await self.execute(
+            "UPDATE devices SET current_milestone = %s WHERE id = %s",
+            (milestone, device['id'])
+        )
+
+    async def get_total_milestones_for_device(self, mac: str) -> int:
+        """获取设备所属分组的总里程碑数"""
+        device = await self.get_device_by_mac(mac)
+        if not device:
+            return 3
+        group = await self.fetchone("SELECT milestone_count FROM `groups` WHERE id = %s", (device['group_id'],))
+        return group['milestone_count'] if group else 3
+
     # ==================== 对话操作 ====================
     async def add_message(self, mac: str, role: str, content: str, current_milestone: int = 1):
         if role not in ('user', 'AI', 'system'):
@@ -202,6 +251,23 @@ class AsyncMySQLManager:
             (device['id'], limit)
         )
         return rows
+    
+    async def get_messages_by_milestone(self, mac: str, milestone_number: int, limit: int = 500) -> List[Dict[str, Any]]:
+        """获取指定设备在特定里程碑期间的对话记录（按时间正序）"""
+        device = await self.get_device_by_mac(mac)
+        if not device:
+            return []
+        rows = await self.fetchall(
+            """
+            SELECT role, content, current_milestone, created_at
+            FROM conversations
+            WHERE device_id = %s AND current_milestone = %s
+            ORDER BY created_at ASC
+            LIMIT %s
+            """,
+            (device['id'], milestone_number, limit)
+        )
+        return rows
 
     async def get_total_message_count(self, mac: str) -> int:
         device = await self.get_device_by_mac(mac)
@@ -228,9 +294,48 @@ class AsyncMySQLManager:
             (count, device['id'])
         )
 
-    # ==================== 任务统计 ====================
+    async def get_latest_summary_by_mac(self, mac: str) -> Optional[str]:
+        """获取设备最新会话的摘要"""
+        device = await self.get_device_by_mac(mac)
+        if not device:
+            return None
+        row = await self.fetchone(
+            "SELECT summary_context FROM conversations WHERE device_id = %s ORDER BY created_at DESC LIMIT 1",
+            (device['id'],)
+        )
+        return row['summary_context'] if row else None
+
+    async def get_device_latest_conversation(self, mac: str) -> Optional[Dict[str, Any]]:
+        """获取设备的最新会话记录（包含 id 和 summary_context）"""
+        device = await self.get_device_by_mac(mac)
+        if not device:
+            return None
+        return await self.fetchone(
+            "SELECT id, summary_context FROM conversations WHERE device_id = %s ORDER BY created_at DESC LIMIT 1",
+            (device['id'],)
+        )
+
+    async def create_conversation(self, mac: str) -> int:
+        """为设备创建一条新的会话记录（初始角色为 system）"""
+        device = await self.get_device_by_mac(mac)
+        if not device:
+            raise ValueError(f"设备 {mac} 不存在")
+        await self.execute(
+            "INSERT INTO conversations (device_id, role, content) VALUES (%s, 'system', '会话开始')",
+            (device['id'],)
+        )
+        result = await self.fetchone("SELECT LAST_INSERT_ID() as id")
+        return result['id']
+
+    async def update_conversation_summary(self, conv_id: int, summary: str):
+        """更新指定会话的摘要字段"""
+        await self.execute(
+            "UPDATE conversations SET summary_context = %s WHERE id = %s",
+            (summary, conv_id)
+        )
+
+    # ==================== 任务统计（临时） ====================
     async def get_task_statistics(self, mac: str) -> Dict[str, Any]:
-        # 临时默认值
         return {
             "avg_health": 100,
             "avg_satiety": 100,
@@ -241,7 +346,7 @@ class AsyncMySQLManager:
             "record_count": 0
         }
 
-    # ==================== 人物画像与照片 ====================
+    # ==================== 人物画像 ====================
     async def update_persona(self, mac: str, persona: str):
         device = await self.get_device_by_mac(mac)
         if not device:
@@ -251,23 +356,83 @@ class AsyncMySQLManager:
             (persona, device['id'])
         )
 
-    async def update_preset_photo(self, mac: str, url: str):
-        device = await self.get_device_by_mac(mac)
-        if not device:
-            return
+    # ==================== 里程碑相关（支持 questions JSON） ====================
+    async def set_milestone_questions(self, device_id: int, milestone_number: int, questions: list):
+        """存储某个里程碑的问题列表（JSON格式）"""
+        questions_json = json.dumps(questions, ensure_ascii=False)
+        question_count = len(questions)
         await self.execute(
-            "UPDATE devices SET preset_photo_url = %s WHERE id = %s",
-            (url, device['id'])
+            """
+            INSERT INTO milestones (device_id, milestone_number, question_count, questions)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                question_count = VALUES(question_count),
+                questions = VALUES(questions)
+            """,
+            (device_id, milestone_number, question_count, questions_json)
         )
 
-    async def update_ai_photo(self, mac: str, url: str):
+    async def set_milestone_question_count(self, device_id: int, milestone_number: int, question_count: int):
+        """仅设置问题数量（兼容旧逻辑）"""
+        await self.execute(
+            """
+            INSERT INTO milestones (device_id, milestone_number, question_count)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE question_count = VALUES(question_count)
+            """,
+            (device_id, milestone_number, question_count)
+        )
+
+    async def get_milestone_answers(self, device_id: int, milestone_number: int) -> list:
+        return await self.fetchall(
+            "SELECT question_index, answer_text FROM milestone_answers WHERE device_id = %s AND milestone_number = %s ORDER BY question_index",
+            (device_id, milestone_number)
+        )
+
+    async def get_all_milestone_qa_pairs(self, device_id: int) -> list:
+        """获取设备所有已识别的问答对，从 questions JSON 中提取问题文本"""
+        rows = await self.fetchall(
+            """
+            SELECT ma.milestone_number, ma.question_index, ma.answer_text, m.questions
+            FROM milestone_answers ma
+            JOIN milestones m ON m.device_id = ma.device_id AND m.milestone_number = ma.milestone_number
+            WHERE ma.device_id = %s AND ma.answer_text IS NOT NULL AND ma.answer_text != ''
+            ORDER BY ma.milestone_number, ma.question_index
+            """,
+            (device_id,)
+        )
+        qa_pairs = []
+        for row in rows:
+            milestone_num = row['milestone_number']
+            q_index = row['question_index']
+            questions_json = row['questions']
+            if questions_json:
+                try:
+                    questions = json.loads(questions_json)
+                    if isinstance(questions, list) and q_index <= len(questions):
+                        question_text = questions[q_index - 1]
+                    else:
+                        question_text = f"里程碑{milestone_num}第{q_index}个问题"
+                except:
+                    question_text = f"里程碑{milestone_num}第{q_index}个问题"
+            else:
+                question_text = f"里程碑{milestone_num}第{q_index}个问题"
+            qa_pairs.append({'question': question_text, 'answer': row['answer_text']})
+        return qa_pairs
+
+    async def get_milestone_qa_pairs_by_mac(self, mac: str) -> list:
         device = await self.get_device_by_mac(mac)
         if not device:
-            return
-        await self.execute(
-            "UPDATE devices SET ai_generated_photo_url = %s WHERE id = %s",
-            (url, device['id'])
+            return []
+        rows = await self.fetchall(
+            "SELECT assessment_goal AS question, child_answer_text AS answer FROM milestones WHERE device_id = %s AND assessment_goal IS NOT NULL AND child_answer_text IS NOT NULL AND assessment_goal != '' AND child_answer_text != '' ORDER BY milestone_number ASC",
+            (device['id'],)
         )
+        return rows
+
+    # ==================== 所有设备信息 ====================
+    async def get_all_devices(self) -> List[Dict[str, Any]]:
+        return await self.fetchall("SELECT * FROM devices ORDER BY created_at DESC")
 
     # ==================== 兼容旧接口 ====================
     async def add_conversation_message(self, mac: str, role: str, content: str, current_milestone: int = None):
@@ -285,9 +450,3 @@ class AsyncMySQLManager:
 
     async def get_recent_messages_by_device(self, mac: str, limit: int = 100) -> List[Dict[str, Any]]:
         return await self.get_recent_messages(mac, limit)
-
-    async def get_latest_summary_by_mac(self, mac: str) -> Optional[str]:
-        return None
-
-    async def update_conversation_summary(self, conv_id: int, summary: str):
-        pass

@@ -7,7 +7,7 @@ from audio_manager import DialogSession
 from esp_websocket_server import ESPWebSocketServer
 from db_manager import AsyncMySQLManager
 from http_server import HTTPServer
-from persona_generator import generate_persona_analysis
+from milestone_tts_generator import generate_all_milestone_audios   # 新增导入
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Real-time Dialog Client")
@@ -23,6 +23,9 @@ async def main() -> None:
     await db_manager.ensure_database()
     await db_manager.create_pool()
     await db_manager.init_tables()
+
+    # ---------- 后台生成所有缺失的里程碑音频（不阻塞主流程） ----------
+    asyncio.create_task(generate_all_milestone_audios(db_manager))
 
     # ---------- 对话会话 ----------
     session = DialogSession(
@@ -43,9 +46,6 @@ async def main() -> None:
 
     # ---------- HTTPS 服务器 ----------
     http_server = HTTPServer(db_manager, esp_server)
-
-    # 注入 http_server 到 persona_generator 以便广播异常
-    generate_persona_analysis.http_server = http_server
 
     # ---------- 任务定义 ----------
     async def start_server():

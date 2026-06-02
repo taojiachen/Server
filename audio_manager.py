@@ -16,8 +16,6 @@ import pyaudio
 
 import config
 from realtime_dialog_client import RealtimeDialogClient
-from AI_toy_picture import generate_and_save_images
-from persona_generator import summarize_with_history, generate_persona_analysis
 
 
 @dataclass
@@ -79,9 +77,9 @@ class DialogSession:
         self.use_microphone = use_microphone
         self.db_manager = None
         self.mac_address = None
-        self._analysis_in_progress = False
         self.history_summary = None
         self.custom_start_session_req = copy.deepcopy(config.start_session_req)
+        self.current_milestone = 1   # 新增：当前设备所处的里程碑
 
         self.current_audio_buffer = b''
         self.is_audio_accumulating = False
@@ -146,28 +144,6 @@ class DialogSession:
     def set_esp_server(self, esp_server):
         self.esp_server = esp_server
         print("ESP服务器引用已设置")
-
-    async def _try_auto_analysis(self):
-        if self._analysis_in_progress or not self.db_manager or not self.mac_address:
-            return
-        try:
-            self._analysis_in_progress = True
-            total_msgs = await self.db_manager.get_total_message_count(self.mac_address)
-            last_count = await self.db_manager.get_last_analysis_count(self.mac_address)
-            new_msgs = total_msgs - last_count
-            print(f"📊 自上次分析后新增消息: {new_msgs} (总={total_msgs}, 上次={last_count})")
-            if new_msgs >= 50:
-                print(f"🔔 触发自动分析 (新增 {new_msgs} 条)")
-                await summarize_with_history(self.mac_address, 100, self.db_manager)
-                await generate_persona_analysis(self.mac_address, self.db_manager)
-                await self.db_manager.set_last_analysis_count(self.mac_address, total_msgs)
-                print(f"✅ 分析完成，last_analysis_count 更新为 {total_msgs}")
-                asyncio.create_task(generate_and_save_images(self.mac_address, self.db_manager))
-                print("🎨 已触发 AI 图片生成任务")
-        except Exception as e:
-            print(f"自动分析失败: {e}")
-        finally:
-            self._analysis_in_progress = False
 
     async def handle_server_response(self, response):
         if response['message_type'] == 'SERVER_ACK' and isinstance(response.get('payload_msg'), bytes):
@@ -237,7 +213,7 @@ class DialogSession:
                         if user_text:
                             print(f"用户说: {user_text}")
                             if self.db_manager and self.mac_address:
-                                await self.db_manager.add_message(self.mac_address, 'user', user_text)
+                                await self.db_manager.add_message(self.mac_address, 'user', user_text, self.current_milestone)
                                 asyncio.create_task(self._try_auto_analysis())
 
             if event == 351:
@@ -246,7 +222,7 @@ class DialogSession:
                 if full_reply:
                     print(f"AI 回复: {full_reply}")
                     if self.db_manager and self.mac_address:
-                        await self.db_manager.add_message(self.mac_address, 'AI', full_reply)
+                        await self.db_manager.add_message(self.mac_address, 'AI', full_reply, self.current_milestone)
                         asyncio.create_task(self._try_auto_analysis())
                     self.current_reply_text = ''
 
@@ -260,7 +236,7 @@ class DialogSession:
             if event == 359:
                 if self.current_reply_text:
                     if self.db_manager and self.mac_address:
-                        await self.db_manager.add_message(self.mac_address, 'AI', self.current_reply_text)
+                        await self.db_manager.add_message(self.mac_address, 'AI', self.current_reply_text, self.current_milestone)
                     self.current_reply_text = ''
                 print("收到音频结束事件，发送剩余音频数据")
                 if len(self.accumulated_buffer) > 0:
@@ -472,6 +448,13 @@ class DialogSession:
         finally:
             self.is_processing_audio = False
 
+    async def update_current_milestone(self, milestone: int):
+        """外部调用，更新当前里程碑"""
+        self.current_milestone = milestone
+        if self.db_manager and self.mac_address:
+            await self.db_manager.update_device_current_milestone(self.mac_address, milestone)
+            print(f"🔄 对话会话里程碑已更新为 {milestone}")
+
     async def start(self) -> None:
         try:
             if self.db_manager and not self.mac_address:
@@ -481,6 +464,10 @@ class DialogSession:
                 print(f"✅ 已获取 MAC 地址: {self.mac_address}")
 
             if self.db_manager and self.mac_address:
+                # 获取当前里程碑
+                self.current_milestone = await self.db_manager.get_device_current_milestone(self.mac_address)
+                print(f"📌 当前里程碑: {self.current_milestone}")
+
                 summary = await self.db_manager.get_latest_summary_by_mac(self.mac_address)
                 if summary:
                     self.history_summary = summary

@@ -1,16 +1,23 @@
+# -*- coding: utf-8 -*-
+# @Project : tob_service
+# @Company : ByteDance
+# @Time    : 2026/2/27 10:00
+# @Author  : SiNian
+# @FileName: TTSv3HttpDemo.py
+# @IDE: PyCharm
+# @Motto：  I,with no mountain to rely on,am the mountain myself.
 import requests
 import json
 import base64
 import os
 import traceback
-from dotenv import load_dotenv
 
-load_dotenv()
+# python版本：==3.11
 
 # -------------客户需要填写的参数----------------
-appID = os.getenv("APPID")
-accessKey = os.getenv("ACCESS_KEY")
-resourceID = "seed-tts-2.0"
+appID = "5008724293"
+accessKey = "7K1FFrQQuB273YYP1IO2XrlY8argv5GY"
+resourceID = "seed-tts-1.0"
 
 text = "这是一段测试文本，用于测试字节大模型语音合成http单向流式接口效果。"
 # ---------------请求地址----------------------
@@ -129,11 +136,11 @@ if __name__ == "__main__":
         },
         "req_params":{
             "text": "请对准小蒜苗拍下照片让我们一起见证它的成长吧！",
-            "speaker": "zh_female_wenroumama_uranus_bigtts",
+            "speaker": "zh_female_cancan_mars_bigtts",
             "audio_params": {
                 "format": "ogg_opus",
-                "sample_rate": 16000,
-                "bit_rate": 128,
+                "sample_rate": 8000,
+                "bit_rate": 8,
                 "enable_timestamp": True
             },
             "additions": "{\"explicit_language\":\"zh\",\"disable_markdown_filter\":true, \"enable_timestamp\":true}\"}"
