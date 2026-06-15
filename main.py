@@ -8,6 +8,7 @@ from esp_websocket_server import ESPWebSocketServer
 from db_manager import AsyncMySQLManager
 from http_server import HTTPServer
 from milestone_tts_generator import generate_all_milestone_audios   # 新增导入
+import ip_shadow_updater   # 新增 IP 影子监控模块
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Real-time Dialog Client")
@@ -72,11 +73,15 @@ async def main() -> None:
     # 启动 HTTPS 服务器
     await http_server.start(port=8443, ssl_context=ssl_context)
 
+    # 启动 IP 影子监控（每 60 秒检查一次）
+    ip_monitor_task = asyncio.create_task(ip_shadow_updater.start_ip_shadow_monitor(60))
+
     # 同时运行 ESP 服务器和对话客户端
     try:
         await asyncio.gather(
             start_server(),
             start_client(),
+            ip_monitor_task,
             return_exceptions=True
         )
     finally:
